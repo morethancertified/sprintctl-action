@@ -1,5 +1,5 @@
 name: 'CloudSprints Grader'
-description: 'Grade CloudSprints labs via pull request. Parses lesson token from branch name (grade/<token>), identifies student by Git email, runs validation commands, and submits for AI grading.'
+description: 'Grade CloudSprints labs via pull request. Parses lesson token from branch name (grade/<token>), identifies student by Git email, collects repo files, and submits for AI grading.'
 author: 'CloudSprints'
 
 branding:
@@ -110,112 +110,47 @@ runs:
         echo "email=$EMAIL" >> $GITHUB_OUTPUT
         echo "::endgroup::"
 
-    # Step 3: Fetch lesson details from API
-    - name: Fetch lesson details
-      id: lesson
+    # Step 3: Collect repo files
+    - name: Collect repo files
+      id: collect
       shell: bash
       run: |
-        echo "::group::Fetching Lesson"
-        LESSON_TOKEN="${{ steps.extract.outputs.lesson_token }}"
-        EMAIL="${{ steps.identity.outputs.email }}"
-        API_URL="${{ inputs.api-url }}"
+        echo "::group::Collecting Files"
+        cd "$GITHUB_WORKSPACE"
 
-        PAYLOAD=$(jq -nc \
-          --arg action "fetch" \
-          --arg email "$EMAIL" \
-          --arg user_lesson_id "$LESSON_TOKEN" \
-          '{action: $action, email: $email, user_lesson_id: $user_lesson_id}')
+        # Collect all non-hidden, non-workflow files
+        FILE_OUTPUT=""
+        FILE_COUNT=0
+        while IFS= read -r -d '' FILE; do
+          CONTENT=$(cat "$FILE")
+          FILE_OUTPUT="${FILE_OUTPUT}
+-------------
+${FILE}
+-------------
+${CONTENT}
+"
+          FILE_COUNT=$((FILE_COUNT + 1))
+          echo "  Found: $FILE"
+        done < <(find . -type f \
+          ! -path './.git/*' \
+          ! -path './.github/*' \
+          ! -name '.*' \
+          -print0)
 
-        RESPONSE=$(curl -s -w "\n%{http_code}" \
-          -X POST \
-          -H "X-API-Key: ${{ inputs.api-key }}" \
-          -H "Content-Type: application/json" \
-          -d "$PAYLOAD" \
-          "${API_URL}/api/github/grade" 2>&1) || true
+        echo "Collected $FILE_COUNT files"
 
-        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-        BODY=$(echo "$RESPONSE" | sed '$d')
+        # Build a single CLI result with all file contents
+        jq -nc \
+          --arg cmd "find (all repo files)" \
+          --arg stdout "$FILE_OUTPUT" \
+          --arg stderr "" \
+          --argjson exit_code 0 \
+          '[{command: $cmd, stdout: $stdout, stderr: $stderr, exit_code: $exit_code}]' \
+          > /tmp/sprintctl_cli_results.json
 
-        if [ "$HTTP_CODE" != "200" ]; then
-          echo "::error::Failed to fetch lesson (HTTP $HTTP_CODE). Check that your email ($EMAIL) is registered and lesson token ($LESSON_TOKEN) is correct."
-          echo "Response: $BODY"
-          exit 1
-        fi
-
-        # Save full response to file (avoids GITHUB_OUTPUT escaping issues)
-        echo "$BODY" > /tmp/sprintctl_lesson.json
-
-        CLI_COMMANDS=$(jq -c '.cli_commands // []' /tmp/sprintctl_lesson.json)
-        TASK_COUNT=$(jq '.tasks | length' /tmp/sprintctl_lesson.json)
-        LESSON_ID=$(jq -r '.id' /tmp/sprintctl_lesson.json)
-
-        echo "Lesson ID: $LESSON_ID"
-        echo "Tasks: $TASK_COUNT"
-        echo "CLI Commands count: $(echo "$CLI_COMMANDS" | jq length)"
-
-        echo "task_count=$TASK_COUNT" >> $GITHUB_OUTPUT
-        echo "lesson_id=$LESSON_ID" >> $GITHUB_OUTPUT
         echo "::endgroup::"
 
-    # Step 4: Run CLI validation commands
-    - name: Run validation commands
-      id: validate
-      shell: bash
-      run: |
-        echo "::group::Running Validation Commands"
-
-        # Get number of commands
-        CMD_COUNT=$(jq '.cli_commands | length' /tmp/sprintctl_lesson.json)
-        echo "Total commands to run: $CMD_COUNT"
-
-        # Clear results file
-        > /tmp/sprintctl_results.jsonl
-
-        # Iterate by index
-        for (( i=0; i<CMD_COUNT; i++ )); do
-          CMD=$(jq -r ".cli_commands[$i]" /tmp/sprintctl_lesson.json)
-
-          echo "---"
-          echo "Command $((i + 1))/$CMD_COUNT: $CMD"
-
-          # Write to temp file and execute with bash
-          # Use printf '%s' to avoid any interpretation of the command string
-          printf '%s\n' "$CMD" > /tmp/sprintctl_cmd.sh
-          set +e
-          STDOUT=$(cd "$GITHUB_WORKSPACE" && LANG=en_US.UTF-8 bash -e /tmp/sprintctl_cmd.sh 2>/tmp/sprintctl_stderr)
-          EXIT_CODE=$?
-          STDERR=$(cat /tmp/sprintctl_stderr 2>/dev/null || echo "")
-          set -e
-
-          echo "Exit code: $EXIT_CODE"
-          if [ -n "$STDOUT" ]; then
-            echo "Stdout: ${STDOUT:0:500}"
-          fi
-          if [ -n "$STDERR" ]; then
-            echo "Stderr: ${STDERR:0:500}"
-          fi
-
-          RESULT=$(jq -nc \
-            --arg cmd "$CMD" \
-            --arg stdout "$STDOUT" \
-            --arg stderr "$STDERR" \
-            --argjson exit_code "$EXIT_CODE" \
-            '{command: $cmd, stdout: $stdout, stderr: $stderr, exit_code: $exit_code}')
-
-          echo "$RESULT" >> /tmp/sprintctl_results.jsonl
-        done
-
-        if [ -s /tmp/sprintctl_results.jsonl ]; then
-          RESULTS=$(jq -sc '.' /tmp/sprintctl_results.jsonl)
-        else
-          RESULTS="[]"
-        fi
-
-        echo "$RESULTS" > /tmp/sprintctl_cli_results.json
-        echo "Collected results for $(echo "$RESULTS" | jq length) commands"
-        echo "::endgroup::"
-
-    # Step 5: Submit for grading
+    # Step 4: Submit for grading
     - name: Submit for grading
       id: grade
       shell: bash
