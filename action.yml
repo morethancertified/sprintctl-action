@@ -117,37 +117,20 @@ runs:
       run: |
         echo "::group::Collecting Files"
         cd "$GITHUB_WORKSPACE"
-
-        # Collect all non-hidden, non-workflow files
-        FILE_OUTPUT=""
+        > /tmp/sprintctl_files.txt
         FILE_COUNT=0
         while IFS= read -r -d '' FILE; do
-          CONTENT=$(cat "$FILE")
-          FILE_OUTPUT="${FILE_OUTPUT}
--------------
-${FILE}
--------------
-${CONTENT}
-"
+          echo "-------------" >> /tmp/sprintctl_files.txt
+          echo "$FILE" >> /tmp/sprintctl_files.txt
+          echo "-------------" >> /tmp/sprintctl_files.txt
+          cat "$FILE" >> /tmp/sprintctl_files.txt
+          echo "" >> /tmp/sprintctl_files.txt
           FILE_COUNT=$((FILE_COUNT + 1))
           echo "  Found: $FILE"
-        done < <(find . -type f \
-          ! -path './.git/*' \
-          ! -path './.github/*' \
-          ! -name '.*' \
-          -print0)
-
+        done < <(find . -type f ! -path './.git/*' ! -path './.github/*' ! -name '.*' -print0)
         echo "Collected $FILE_COUNT files"
-
-        # Build a single CLI result with all file contents
-        jq -nc \
-          --arg cmd "find (all repo files)" \
-          --arg stdout "$FILE_OUTPUT" \
-          --arg stderr "" \
-          --argjson exit_code 0 \
-          '[{command: $cmd, stdout: $stdout, stderr: $stderr, exit_code: $exit_code}]' \
-          > /tmp/sprintctl_cli_results.json
-
+        FILE_OUTPUT=$(cat /tmp/sprintctl_files.txt)
+        jq -nc --arg cmd "find (all repo files)" --arg stdout "$FILE_OUTPUT" --arg stderr "" --argjson exit_code 0 '[{command: $cmd, stdout: $stdout, stderr: $stderr, exit_code: $exit_code}]' > /tmp/sprintctl_cli_results.json
         echo "::endgroup::"
 
     # Step 4: Submit for grading
