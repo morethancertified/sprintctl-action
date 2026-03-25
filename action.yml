@@ -179,8 +179,10 @@ runs:
           echo "---"
           echo "Command $((i + 1))/$CMD_COUNT: $CMD"
 
+          # Write command directly to temp script via jq to preserve all special characters
+          jq -r ".cli_commands[$i]" /tmp/sprintctl_lesson.json > /tmp/sprintctl_cmd.sh
           set +e
-          STDOUT=$(LANG=en_US.UTF-8 eval "$CMD" 2>/tmp/sprintctl_stderr)
+          STDOUT=$(LANG=en_US.UTF-8 bash /tmp/sprintctl_cmd.sh 2>/tmp/sprintctl_stderr)
           EXIT_CODE=$?
           STDERR=$(cat /tmp/sprintctl_stderr 2>/dev/null || echo "")
           set -e
