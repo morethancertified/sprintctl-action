@@ -142,15 +142,17 @@ runs:
           exit 1
         fi
 
-        CLI_COMMANDS=$(echo "$BODY" | jq -c '.cli_commands // []')
-        TASK_COUNT=$(echo "$BODY" | jq '.tasks | length')
-        LESSON_ID=$(echo "$BODY" | jq -r '.id')
+        # Save full response to file (avoids GITHUB_OUTPUT escaping issues)
+        echo "$BODY" > /tmp/sprintctl_lesson.json
+
+        CLI_COMMANDS=$(jq -c '.cli_commands // []' /tmp/sprintctl_lesson.json)
+        TASK_COUNT=$(jq '.tasks | length' /tmp/sprintctl_lesson.json)
+        LESSON_ID=$(jq -r '.id' /tmp/sprintctl_lesson.json)
 
         echo "Lesson ID: $LESSON_ID"
         echo "Tasks: $TASK_COUNT"
-        echo "CLI Commands: $CLI_COMMANDS"
+        echo "CLI Commands count: $(echo "$CLI_COMMANDS" | jq length)"
 
-        echo "cli_commands=$CLI_COMMANDS" >> $GITHUB_OUTPUT
         echo "task_count=$TASK_COUNT" >> $GITHUB_OUTPUT
         echo "lesson_id=$LESSON_ID" >> $GITHUB_OUTPUT
         echo "::endgroup::"
@@ -161,10 +163,10 @@ runs:
       shell: bash
       run: |
         echo "::group::Running Validation Commands"
-        CLI_COMMANDS='${{ steps.lesson.outputs.cli_commands }}'
         CMD_INDEX=0
 
-        echo "$CLI_COMMANDS" | jq -r '.[]' | while IFS= read -r CMD; do
+        # Read commands from saved lesson file (avoids GITHUB_OUTPUT escaping issues)
+        jq -r '.cli_commands[]' /tmp/sprintctl_lesson.json | while IFS= read -r CMD; do
           echo "---"
           echo "Command $((CMD_INDEX + 1)): $CMD"
 
