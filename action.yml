@@ -167,27 +167,22 @@ runs:
         # Get number of commands
         CMD_COUNT=$(jq '.cli_commands | length' /tmp/sprintctl_lesson.json)
         echo "Total commands to run: $CMD_COUNT"
-        echo "DEBUG raw JSON cli_commands:"
-        jq '.cli_commands' /tmp/sprintctl_lesson.json
-        echo "DEBUG jq -r output:"
-        jq -r '.cli_commands[0]' /tmp/sprintctl_lesson.json | cat -A
 
         # Clear results file
         > /tmp/sprintctl_results.jsonl
 
-        # Iterate by index to preserve full command strings (avoids newline splitting)
+        # Iterate by index
         for (( i=0; i<CMD_COUNT; i++ )); do
-          # Write command to temp script using jq -r (properly unescapes JSON)
-          jq -r ".cli_commands[$i]" /tmp/sprintctl_lesson.json > /tmp/sprintctl_cmd.sh
-          CMD=$(cat /tmp/sprintctl_cmd.sh)
+          CMD=$(jq -r ".cli_commands[$i]" /tmp/sprintctl_lesson.json)
 
           echo "---"
-          echo "Command $((i + 1))/$CMD_COUNT:"
-          cat -v /tmp/sprintctl_cmd.sh
-          echo "---"
+          echo "Command $((i + 1))/$CMD_COUNT: $CMD"
 
+          # Write to temp file and execute with bash
+          # Use printf '%s' to avoid any interpretation of the command string
+          printf '%s\n' "$CMD" > /tmp/sprintctl_cmd.sh
           set +e
-          STDOUT=$(LANG=en_US.UTF-8 bash /tmp/sprintctl_cmd.sh 2>/tmp/sprintctl_stderr)
+          STDOUT=$(cd "$GITHUB_WORKSPACE" && LANG=en_US.UTF-8 bash -e /tmp/sprintctl_cmd.sh 2>/tmp/sprintctl_stderr)
           EXIT_CODE=$?
           STDERR=$(cat /tmp/sprintctl_stderr 2>/dev/null || echo "")
           set -e
