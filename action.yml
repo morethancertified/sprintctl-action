@@ -173,19 +173,17 @@ runs:
 
         # Iterate by index to preserve full command strings (avoids newline splitting)
         for (( i=0; i<CMD_COUNT; i++ )); do
-          # Extract raw JSON string (with escapes intact), then strip outer quotes
-          # This preserves \; for find -exec, matching how the Go CLI runs commands via sh -c
-          CMD_RAW=$(jq ".cli_commands[$i]" /tmp/sprintctl_lesson.json)
-          # Strip leading/trailing quotes from JSON string
-          CMD_CLEAN="${CMD_RAW#\"}"
-          CMD_CLEAN="${CMD_CLEAN%\"}"
+          # Write command to temp script using jq -r (properly unescapes JSON)
+          jq -r ".cli_commands[$i]" /tmp/sprintctl_lesson.json > /tmp/sprintctl_cmd.sh
+          CMD=$(cat /tmp/sprintctl_cmd.sh)
 
           echo "---"
-          echo "Command $((i + 1))/$CMD_COUNT: $CMD_CLEAN"
+          echo "Command $((i + 1))/$CMD_COUNT:"
+          cat -v /tmp/sprintctl_cmd.sh
+          echo "---"
 
-          # Run via sh -c (same as Go CLI: exec.Command("sh", "-c", command))
           set +e
-          STDOUT=$(LANG=en_US.UTF-8 sh -c "$CMD_CLEAN" 2>/tmp/sprintctl_stderr)
+          STDOUT=$(LANG=en_US.UTF-8 bash /tmp/sprintctl_cmd.sh 2>/tmp/sprintctl_stderr)
           EXIT_CODE=$?
           STDERR=$(cat /tmp/sprintctl_stderr 2>/dev/null || echo "")
           set -e
@@ -199,7 +197,7 @@ runs:
           fi
 
           RESULT=$(jq -nc \
-            --arg cmd "$CMD_CLEAN" \
+            --arg cmd "$CMD" \
             --arg stdout "$STDOUT" \
             --arg stderr "$STDERR" \
             --argjson exit_code "$EXIT_CODE" \
