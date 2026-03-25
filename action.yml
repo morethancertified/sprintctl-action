@@ -74,10 +74,16 @@ runs:
     - name: Detect student identity
       id: identity
       shell: bash
+      env:
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         echo "::group::Student Identity"
-        # Get email from the latest commit author
-        EMAIL=$(git log -1 --format='%ae' 2>/dev/null || echo "")
+        # Use the PR head commit (not the merge commit) to get the real author email
+        if [ -n "$PR_HEAD_SHA" ]; then
+          EMAIL=$(git log -1 --format='%ae' "$PR_HEAD_SHA" 2>/dev/null || echo "")
+        else
+          EMAIL=$(git log -1 --format='%ae' 2>/dev/null || echo "")
+        fi
 
         if [ -z "$EMAIL" ]; then
           echo "::error::Could not detect student email from Git commit. Make sure you have committed your work."
