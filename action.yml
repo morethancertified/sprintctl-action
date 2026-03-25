@@ -167,6 +167,10 @@ runs:
         # Get number of commands
         CMD_COUNT=$(jq '.cli_commands | length' /tmp/sprintctl_lesson.json)
         echo "Total commands to run: $CMD_COUNT"
+        echo "DEBUG raw JSON cli_commands:"
+        jq '.cli_commands' /tmp/sprintctl_lesson.json
+        echo "DEBUG jq -r output:"
+        jq -r '.cli_commands[0]' /tmp/sprintctl_lesson.json | cat -A
 
         # Clear results file
         > /tmp/sprintctl_results.jsonl
