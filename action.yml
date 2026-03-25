@@ -1,5 +1,5 @@
 name: 'CloudSprints Grader'
-description: 'Grade CloudSprints labs via pull request. Parses lesson token from branch name (grade/<token>), runs validation commands, and submits for AI grading.'
+description: 'Grade CloudSprints labs via pull request. Parses lesson token from branch name (grade/<token>), identifies student by Git email, runs validation commands, and submits for AI grading.'
 author: 'CloudSprints'
 
 branding:
@@ -7,13 +7,13 @@ branding:
   color: 'green'
 
 inputs:
-  token:
-    description: 'CloudSprints API token (from repository secret)'
+  api-key:
+    description: 'CloudSprints API key for GitHub Actions (from repository secret CLOUDSPRINTS_API_KEY)'
     required: true
   api-url:
     description: 'CloudSprints API base URL'
     required: false
-    default: 'https://cloudsprints.com/api/v1'
+    default: 'https://cloudsprints.com'
   branch-prefix:
     description: 'Branch prefix that triggers grading'
     required: false
@@ -22,19 +22,14 @@ inputs:
     description: 'URL to POST grading results for GitHub App check run updates'
     required: false
     default: ''
-  repo:
-    description: 'Repository in owner/repo format (auto-detected)'
-    required: false
-    default: ''
-  pr-number:
-    description: 'Pull request number (auto-detected)'
-    required: false
-    default: ''
 
 outputs:
   lesson-token:
     description: 'The lesson token extracted from the branch name'
     value: ${{ steps.extract.outputs.lesson_token }}
+  email:
+    description: 'The student email detected from the PR'
+    value: ${{ steps.identity.outputs.email }}
   passed:
     description: 'Number of tasks that passed'
     value: ${{ steps.grade.outputs.passed }}
@@ -65,7 +60,6 @@ runs:
         echo "Branch: $BRANCH"
         echo "Prefix: $PREFIX"
 
-        # Strip prefix to get lesson token
         if [[ "$BRANCH" == ${PREFIX}* ]]; then
           LESSON_TOKEN="${BRANCH#${PREFIX}}"
           echo "Lesson token: $LESSON_TOKEN"
@@ -76,30 +70,56 @@ runs:
         fi
         echo "::endgroup::"
 
-    # Step 2: Fetch lesson details from API
+    # Step 2: Detect student email from Git commit
+    - name: Detect student identity
+      id: identity
+      shell: bash
+      run: |
+        echo "::group::Student Identity"
+        # Get email from the latest commit author
+        EMAIL=$(git log -1 --format='%ae' 2>/dev/null || echo "")
+
+        if [ -z "$EMAIL" ]; then
+          echo "::error::Could not detect student email from Git commit. Make sure you have committed your work."
+          exit 1
+        fi
+
+        echo "Student email: $EMAIL"
+        echo "email=$EMAIL" >> $GITHUB_OUTPUT
+        echo "::endgroup::"
+
+    # Step 3: Fetch lesson details from API
     - name: Fetch lesson details
       id: lesson
       shell: bash
       run: |
         echo "::group::Fetching Lesson"
         LESSON_TOKEN="${{ steps.extract.outputs.lesson_token }}"
+        EMAIL="${{ steps.identity.outputs.email }}"
         API_URL="${{ inputs.api-url }}"
 
-        RESPONSE=$(curl -sf -w "\n%{http_code}" \
-          -H "Authorization: Bearer ${{ inputs.token }}" \
+        PAYLOAD=$(jq -nc \
+          --arg action "fetch" \
+          --arg email "$EMAIL" \
+          --arg user_lesson_id "$LESSON_TOKEN" \
+          '{action: $action, email: $email, user_lesson_id: $user_lesson_id}')
+
+        RESPONSE=$(curl -s -w "\n%{http_code}" \
+          -X POST \
+          -H "X-API-Key: ${{ inputs.api-key }}" \
           -H "Content-Type: application/json" \
-          "${API_URL}/lessons/${LESSON_TOKEN}" 2>&1) || true
+          -d "$PAYLOAD" \
+          "${API_URL}/api/github/grade" 2>&1) || true
 
         HTTP_CODE=$(echo "$RESPONSE" | tail -1)
         BODY=$(echo "$RESPONSE" | sed '$d')
 
         if [ "$HTTP_CODE" != "200" ]; then
-          echo "::error::Failed to fetch lesson (HTTP $HTTP_CODE). Check that your token and lesson ID are correct."
+          echo "::error::Failed to fetch lesson (HTTP $HTTP_CODE). Check that your email ($EMAIL) is registered and lesson token ($LESSON_TOKEN) is correct."
           echo "Response: $BODY"
           exit 1
         fi
 
-        # Extract CLI commands as JSON array
         CLI_COMMANDS=$(echo "$BODY" | jq -c '.cli_commands // []')
         TASK_COUNT=$(echo "$BODY" | jq '.tasks | length')
         LESSON_ID=$(echo "$BODY" | jq -r '.id')
@@ -113,23 +133,19 @@ runs:
         echo "lesson_id=$LESSON_ID" >> $GITHUB_OUTPUT
         echo "::endgroup::"
 
-    # Step 3: Run CLI validation commands
+    # Step 4: Run CLI validation commands
     - name: Run validation commands
       id: validate
       shell: bash
       run: |
         echo "::group::Running Validation Commands"
         CLI_COMMANDS='${{ steps.lesson.outputs.cli_commands }}'
-        RESULTS="[]"
         CMD_INDEX=0
-        ALL_PASSED=true
 
-        # Iterate over each command
         echo "$CLI_COMMANDS" | jq -r '.[]' | while IFS= read -r CMD; do
           echo "---"
           echo "Command $((CMD_INDEX + 1)): $CMD"
 
-          # Run command, capture output
           set +e
           STDOUT=$(LANG=en_US.UTF-8 sh -c "$CMD" 2>/tmp/sprintctl_stderr)
           EXIT_CODE=$?
@@ -144,7 +160,6 @@ runs:
             echo "Stderr: ${STDERR:0:500}"
           fi
 
-          # Build result JSON for this command
           RESULT=$(jq -nc \
             --arg cmd "$CMD" \
             --arg stdout "$STDOUT" \
@@ -152,7 +167,6 @@ runs:
             --argjson exit_code "$EXIT_CODE" \
             '{command: $cmd, stdout: $stdout, stderr: $stderr, exit_code: $exit_code}')
 
-          # Append to results file (using file because subshell)
           if [ "$CMD_INDEX" -eq 0 ]; then
             echo "$RESULT" > /tmp/sprintctl_results.jsonl
           else
@@ -162,42 +176,41 @@ runs:
           CMD_INDEX=$((CMD_INDEX + 1))
         done
 
-        # Convert JSONL to JSON array
         if [ -f /tmp/sprintctl_results.jsonl ]; then
           RESULTS=$(jq -sc '.' /tmp/sprintctl_results.jsonl)
         else
           RESULTS="[]"
         fi
 
-        # Write to output file (may be too large for env var)
         echo "$RESULTS" > /tmp/sprintctl_cli_results.json
         echo "Collected results for $(echo "$RESULTS" | jq length) commands"
         echo "::endgroup::"
 
-    # Step 4: Submit for grading
+    # Step 5: Submit for grading
     - name: Submit for grading
       id: grade
       shell: bash
       run: |
         echo "::group::Submitting for Grading"
         LESSON_TOKEN="${{ steps.extract.outputs.lesson_token }}"
+        EMAIL="${{ steps.identity.outputs.email }}"
         API_URL="${{ inputs.api-url }}"
 
-        # Read CLI results
         CLI_RESULTS=$(cat /tmp/sprintctl_cli_results.json)
 
-        # Build submission payload
         PAYLOAD=$(jq -nc \
-          --argjson results "$CLI_RESULTS" \
-          '{type: "COMMAND_RESULTS", cli_command_results: $results}')
+          --arg action "submit" \
+          --arg email "$EMAIL" \
+          --arg user_lesson_id "$LESSON_TOKEN" \
+          --argjson cli_command_results "$CLI_RESULTS" \
+          '{action: $action, email: $email, user_lesson_id: $user_lesson_id, cli_command_results: $cli_command_results}')
 
-        # Submit
-        RESPONSE=$(curl -sf -w "\n%{http_code}" \
+        RESPONSE=$(curl -s -w "\n%{http_code}" \
           -X POST \
-          -H "Authorization: Bearer ${{ inputs.token }}" \
+          -H "X-API-Key: ${{ inputs.api-key }}" \
           -H "Content-Type: application/json" \
           -d "$PAYLOAD" \
-          "${API_URL}/lessons/${LESSON_TOKEN}/submit" 2>&1) || true
+          "${API_URL}/api/github/grade" 2>&1) || true
 
         HTTP_CODE=$(echo "$RESPONSE" | tail -1)
         BODY=$(echo "$RESPONSE" | sed '$d')
@@ -208,7 +221,6 @@ runs:
           exit 1
         fi
 
-        # Parse results
         PASSED=$(echo "$BODY" | jq '[.tasks[] | select(.status == "COMPLETED")] | length')
         FAILED=$(echo "$BODY" | jq '[.tasks[] | select(.status == "FAILED")] | length')
         TOTAL=$(echo "$BODY" | jq '.tasks | length')
@@ -223,10 +235,8 @@ runs:
           echo "status=pass" >> $GITHUB_OUTPUT
         fi
 
-        # Store full results JSON
         echo "results_json=$(echo "$BODY" | jq -c '.')" >> $GITHUB_OUTPUT
 
-        # Print summary
         echo ""
         echo "==============================="
         echo "  GRADING RESULTS: $PASSED/$TOTAL passed"
@@ -234,20 +244,19 @@ runs:
         echo ""
         echo "$BODY" | jq -r '.tasks[] | (if .status == "COMPLETED" then "  ✅" else "  ❌" end) + " " + .title + " (" + .status + ")"'
 
-        # Print AI explanations for failed tasks
         echo ""
         echo "$BODY" | jq -r '.tasks[] | select(.status == "FAILED") | "  💡 " + .title + ": " + (.ai_explanation // "No explanation provided")'
         echo "::endgroup::"
 
-    # Step 5: Post results to GitHub App callback (if configured)
+    # Step 6: Post results to GitHub App callback (if configured)
     - name: Report results to CloudSprints
       if: inputs.callback-url != ''
       shell: bash
       run: |
         echo "::group::Reporting Results"
         CALLBACK_URL="${{ inputs.callback-url }}"
-        REPO="${{ inputs.repo || github.repository }}"
-        PR_NUMBER="${{ inputs.pr-number || github.event.pull_request.number }}"
+        REPO="${{ github.repository }}"
+        PR_NUMBER="${{ github.event.pull_request.number }}"
         SHA="${{ github.event.pull_request.head.sha || github.sha }}"
 
         PAYLOAD=$(jq -nc \
@@ -274,12 +283,12 @@ runs:
 
         curl -sf -X POST \
           -H "Content-Type: application/json" \
-          -H "Authorization: Bearer ${{ inputs.token }}" \
+          -H "X-API-Key: ${{ inputs.api-key }}" \
           -d "$PAYLOAD" \
           "$CALLBACK_URL" || echo "::warning::Failed to report results to CloudSprints (non-fatal)"
         echo "::endgroup::"
 
-    # Step 6: Set job status
+    # Step 7: Set job status
     - name: Check grading status
       shell: bash
       run: |

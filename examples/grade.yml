@@ -12,16 +12,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: cloudsprints/grade-action@v1
+      - uses: morethancertified/sprintctl-action@v1
         id: grading
         with:
-          token: ${{ secrets.CLOUDSPRINTS_TOKEN }}
-          callback-url: 'https://cloudsprints.com/api/github/grading-result'
+          api-key: ${{ secrets.CLOUDSPRINTS_API_KEY }}
+          # Uncomment to enable GitHub App PR comments:
+          # callback-url: 'https://cloudsprints.com/api/github/grading-result'
 
       - name: Grading Summary
         if: always()
         run: |
           echo "## CloudSprints Grading Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Student:** ${{ steps.grading.outputs.email }}" >> $GITHUB_STEP_SUMMARY
           echo "**Score:** ${{ steps.grading.outputs.passed }}/${{ steps.grading.outputs.total }}" >> $GITHUB_STEP_SUMMARY
           echo "**Status:** ${{ steps.grading.outputs.status }}" >> $GITHUB_STEP_SUMMARY

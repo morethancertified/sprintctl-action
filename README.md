@@ -1,13 +1,15 @@
 # CloudSprints Grader Action
 
-Grade CloudSprints labs automatically via pull requests.
+Grade CloudSprints labs automatically via pull requests. No student tokens needed — the action identifies students by their Git commit email.
 
 ## How It Works
 
 1. Name your branch `grade/<lesson-token>` (copy from CloudSprints UI)
 2. Push your code and open a PR
-3. The action extracts the lesson token, runs validation commands, and submits for AI grading
+3. The action detects your email from the Git commit, fetches the lesson, runs validation commands, and submits for AI grading
 4. Results appear in the workflow log (and optionally as PR comments via the CloudSprints GitHub App)
+
+**Prerequisites:** Your Git email must match the email you signed up with on CloudSprints.
 
 ## Quick Start
 
@@ -27,17 +29,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: cloudsprints/grade-action@v1
+      - uses: morethancertified/sprintctl-action@v1
         with:
-          token: ${{ secrets.CLOUDSPRINTS_TOKEN }}
+          api-key: ${{ secrets.CLOUDSPRINTS_API_KEY }}
 ```
 
-### 2. Add your CloudSprints API token
+### 2. Add the API key (instructor/org admin sets this once)
 
-1. Go to your CloudSprints profile → API Tokens
-2. Generate a new token
-3. In your GitHub repo → Settings → Secrets → Actions → New repository secret
-4. Name: `CLOUDSPRINTS_TOKEN`, Value: your token
+The `CLOUDSPRINTS_API_KEY` is a shared key that authenticates the GitHub Action to the CloudSprints API. It is **not** a per-student token.
+
+1. Get the API key from your CloudSprints admin
+2. In your GitHub repo → Settings → Secrets → Actions → New repository secret
+3. Name: `CLOUDSPRINTS_API_KEY`, Value: the key
 
 ### 3. Create a grading branch
 
@@ -63,8 +66,8 @@ The grading action runs automatically. Check the Actions tab for results.
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `token` | ✅ | — | CloudSprints API token |
-| `api-url` | ❌ | `https://cloudsprints.com/api/v1` | API base URL |
+| `api-key` | ✅ | — | CloudSprints API key (shared, set by instructor) |
+| `api-url` | ❌ | `https://cloudsprints.com` | API base URL |
 | `branch-prefix` | ❌ | `grade/` | Branch prefix that triggers grading |
 | `callback-url` | ❌ | — | URL for GitHub App result reporting |
 
@@ -73,6 +76,7 @@ The grading action runs automatically. Check the Actions tab for results.
 | Output | Description |
 |--------|-------------|
 | `lesson-token` | Lesson token extracted from branch |
+| `email` | Student email detected from Git commit |
 | `passed` | Number of tasks passed |
 | `failed` | Number of tasks failed |
 | `total` | Total number of tasks |
@@ -104,10 +108,10 @@ git commit -m "add starter code"
 ## Advanced: Using Outputs
 
 ```yaml
-- uses: cloudsprints/grade-action@v1
+- uses: morethancertified/sprintctl-action@v1
   id: grading
   with:
-    token: ${{ secrets.CLOUDSPRINTS_TOKEN }}
+    api-key: ${{ secrets.CLOUDSPRINTS_API_KEY }}
 
 - name: Custom summary
   if: always()
