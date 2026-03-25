@@ -70,7 +70,14 @@ runs:
         fi
         echo "::endgroup::"
 
-    # Step 2: Detect student email from Git commit
+    # Step 2: Fetch the actual PR head (shallow clone may not have it)
+    - name: Fetch PR head
+      if: github.event_name == 'pull_request'
+      shell: bash
+      run: |
+        git fetch origin "${{ github.event.pull_request.head.sha }}" --depth=1
+
+    # Step 3: Detect student email from Git commit
     - name: Detect student identity
       id: identity
       shell: bash
@@ -81,12 +88,21 @@ runs:
         # Use the PR head commit (not the merge commit) to get the real author email
         if [ -n "$PR_HEAD_SHA" ]; then
           EMAIL=$(git log -1 --format='%ae' "$PR_HEAD_SHA" 2>/dev/null || echo "")
-        else
+        fi
+
+        # Fallback: use the current HEAD (works for push events)
+        if [ -z "$EMAIL" ]; then
           EMAIL=$(git log -1 --format='%ae' 2>/dev/null || echo "")
         fi
 
-        if [ -z "$EMAIL" ]; then
-          echo "::error::Could not detect student email from Git commit. Make sure you have committed your work."
+        # Filter out GitHub noreply emails
+        if echo "$EMAIL" | grep -q 'noreply.github.com'; then
+          echo "::warning::Git email is a GitHub noreply address ($EMAIL). Falling back to second-to-last commit."
+          EMAIL=$(git log -2 --format='%ae' "$PR_HEAD_SHA" 2>/dev/null | tail -1 || echo "")
+        fi
+
+        if [ -z "$EMAIL" ] || echo "$EMAIL" | grep -q 'noreply.github.com'; then
+          echo "::error::Could not detect a real student email. Your Git email is set to a GitHub noreply address. Run: git config --global user.email 'your-cloudsprints-email@example.com'"
           exit 1
         fi
 
