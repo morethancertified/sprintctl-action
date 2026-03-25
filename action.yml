@@ -163,15 +163,24 @@ runs:
       shell: bash
       run: |
         echo "::group::Running Validation Commands"
-        CMD_INDEX=0
 
-        # Read commands from saved lesson file (avoids GITHUB_OUTPUT escaping issues)
-        jq -r '.cli_commands[]' /tmp/sprintctl_lesson.json | while IFS= read -r CMD; do
+        # Get number of commands
+        CMD_COUNT=$(jq '.cli_commands | length' /tmp/sprintctl_lesson.json)
+        echo "Total commands to run: $CMD_COUNT"
+
+        # Clear results file
+        > /tmp/sprintctl_results.jsonl
+
+        # Iterate by index to preserve full command strings (avoids newline splitting)
+        for (( i=0; i<CMD_COUNT; i++ )); do
+          # Extract command as raw string (jq -r unescapes it)
+          CMD=$(jq -r ".cli_commands[$i]" /tmp/sprintctl_lesson.json)
+
           echo "---"
-          echo "Command $((CMD_INDEX + 1)): $CMD"
+          echo "Command $((i + 1))/$CMD_COUNT: $CMD"
 
           set +e
-          STDOUT=$(LANG=en_US.UTF-8 sh -c "$CMD" 2>/tmp/sprintctl_stderr)
+          STDOUT=$(LANG=en_US.UTF-8 eval "$CMD" 2>/tmp/sprintctl_stderr)
           EXIT_CODE=$?
           STDERR=$(cat /tmp/sprintctl_stderr 2>/dev/null || echo "")
           set -e
@@ -191,16 +200,10 @@ runs:
             --argjson exit_code "$EXIT_CODE" \
             '{command: $cmd, stdout: $stdout, stderr: $stderr, exit_code: $exit_code}')
 
-          if [ "$CMD_INDEX" -eq 0 ]; then
-            echo "$RESULT" > /tmp/sprintctl_results.jsonl
-          else
-            echo "$RESULT" >> /tmp/sprintctl_results.jsonl
-          fi
-
-          CMD_INDEX=$((CMD_INDEX + 1))
+          echo "$RESULT" >> /tmp/sprintctl_results.jsonl
         done
 
-        if [ -f /tmp/sprintctl_results.jsonl ]; then
+        if [ -s /tmp/sprintctl_results.jsonl ]; then
           RESULTS=$(jq -sc '.' /tmp/sprintctl_results.jsonl)
         else
           RESULTS="[]"
