@@ -182,7 +182,8 @@ runs:
           echo "status=pass" >> $GITHUB_OUTPUT
         fi
 
-        echo "results_json=$(echo "$BODY" | jq -c '.')" >> $GITHUB_OUTPUT
+        echo "$BODY" | jq -c '.' > /tmp/sprintctl_grading_results.json
+        echo "results_json=$(cat /tmp/sprintctl_grading_results.json)" >> $GITHUB_OUTPUT
 
         echo ""
         echo "==============================="
@@ -206,6 +207,7 @@ runs:
         PR_NUMBER="${{ github.event.pull_request.number }}"
         SHA="${{ github.event.pull_request.head.sha || github.sha }}"
 
+        RESULTS_JSON=$(cat /tmp/sprintctl_grading_results.json)
         PAYLOAD=$(jq -nc \
           --arg repo "$REPO" \
           --arg pr "$PR_NUMBER" \
@@ -215,7 +217,7 @@ runs:
           --argjson failed "${{ steps.grade.outputs.failed }}" \
           --argjson total "${{ steps.grade.outputs.total }}" \
           --arg lesson_token "${{ steps.extract.outputs.lesson_token }}" \
-          --argjson results "${{ steps.grade.outputs.results_json }}" \
+          --argjson results "$RESULTS_JSON" \
           '{
             repo: $repo,
             pr_number: ($pr | tonumber),
