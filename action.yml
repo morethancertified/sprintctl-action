@@ -1,5 +1,5 @@
 name: 'CloudSprints Grader'
-description: 'Grade CloudSprints labs via pull request. Parses lesson token from branch name (grade/<token>), identifies student by Git email, collects repo files, and submits for AI grading.'
+description: 'Grade CloudSprints labs via pull request. Parses lesson token from branch name (grade/<token>), collects repo files, and submits for AI grading. No API key required — authenticates via GitHub App installation.'
 author: 'CloudSprints'
 
 branding:
@@ -8,8 +8,9 @@ branding:
 
 inputs:
   api-key:
-    description: 'CloudSprints API key for GitHub Actions (from repository secret CLOUDSPRINTS_API_KEY)'
-    required: true
+    description: 'CloudSprints API key (optional — not needed if the CloudSprints GitHub App is installed)'
+    required: false
+    default: ''
   api-url:
     description: 'CloudSprints API base URL'
     required: false
@@ -18,17 +19,16 @@ inputs:
     description: 'Branch prefix that triggers grading'
     required: false
     default: 'grade/'
-  callback-url:
-    description: 'URL to POST grading results for GitHub App check run updates'
-    required: false
-    default: ''
 
 outputs:
   lesson-token:
     description: 'The lesson token extracted from the branch name'
     value: ${{ steps.extract.outputs.lesson_token }}
+  github-username:
+    description: 'The GitHub username of the PR author'
+    value: ${{ steps.identity.outputs.github_username }}
   email:
-    description: 'The student email detected from the PR'
+    description: 'The student email detected from the PR (fallback)'
     value: ${{ steps.identity.outputs.email }}
   passed:
     description: 'Number of tasks that passed'
@@ -70,44 +70,37 @@ runs:
         fi
         echo "::endgroup::"
 
-    # Step 2: Fetch the actual PR head (shallow clone may not have it)
-    - name: Fetch PR head
-      if: github.event_name == 'pull_request'
-      shell: bash
-      run: |
-        git fetch origin "${{ github.event.pull_request.head.sha }}" --depth=1
-
-    # Step 3: Detect student email from Git commit
+    # Step 2: Detect student identity
     - name: Detect student identity
       id: identity
       shell: bash
-      env:
-        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         echo "::group::Student Identity"
-        # Use the PR head commit (not the merge commit) to get the real author email
-        if [ -n "$PR_HEAD_SHA" ]; then
-          EMAIL=$(git log -1 --format='%ae' "$PR_HEAD_SHA" 2>/dev/null || echo "")
-        fi
 
-        # Fallback: use the current HEAD (works for push events)
+        # Primary: GitHub username from PR author (always available, no noreply issues)
+        GITHUB_USERNAME="${{ github.event.pull_request.user.login || github.actor }}"
+        echo "GitHub username: $GITHUB_USERNAME"
+        echo "github_username=$GITHUB_USERNAME" >> $GITHUB_OUTPUT
+
+        # Secondary: try to get email from git commit (best-effort fallback)
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          git fetch origin "${{ github.event.pull_request.head.sha }}" --depth=1 2>/dev/null || true
+          EMAIL=$(git log -1 --format='%ae' "${{ github.event.pull_request.head.sha }}" 2>/dev/null || echo "")
+        fi
         if [ -z "$EMAIL" ]; then
           EMAIL=$(git log -1 --format='%ae' 2>/dev/null || echo "")
         fi
-
-        # Filter out GitHub noreply emails
+        # Skip noreply emails — github_username is the primary identity
         if echo "$EMAIL" | grep -q 'noreply.github.com'; then
-          echo "::warning::Git email is a GitHub noreply address ($EMAIL). Falling back to second-to-last commit."
-          EMAIL=$(git log -2 --format='%ae' "$PR_HEAD_SHA" 2>/dev/null | tail -1 || echo "")
+          EMAIL=""
+        fi
+        if [ -n "$EMAIL" ]; then
+          echo "Student email: $EMAIL"
+          echo "email=$EMAIL" >> $GITHUB_OUTPUT
+        else
+          echo "No usable email found (using GitHub username instead)"
         fi
 
-        if [ -z "$EMAIL" ] || echo "$EMAIL" | grep -q 'noreply.github.com'; then
-          echo "::error::Could not detect a real student email. Your Git email is set to a GitHub noreply address. Run: git config --global user.email 'your-cloudsprints-email@example.com'"
-          exit 1
-        fi
-
-        echo "Student email: $EMAIL"
-        echo "email=$EMAIL" >> $GITHUB_OUTPUT
         echo "::endgroup::"
 
     # Step 3: Collect repo files
@@ -140,21 +133,33 @@ runs:
       run: |
         echo "::group::Submitting for Grading"
         LESSON_TOKEN="${{ steps.extract.outputs.lesson_token }}"
+        GITHUB_USERNAME="${{ steps.identity.outputs.github_username }}"
         EMAIL="${{ steps.identity.outputs.email }}"
         API_URL="${{ inputs.api-url }}"
+        REPO="${{ github.repository }}"
+        SHA="${{ github.event.pull_request.head.sha || github.sha }}"
 
         CLI_RESULTS=$(cat /tmp/sprintctl_cli_results.json)
 
         PAYLOAD=$(jq -nc \
           --arg action "submit" \
+          --arg github_username "$GITHUB_USERNAME" \
           --arg email "$EMAIL" \
           --arg user_lesson_id "$LESSON_TOKEN" \
+          --arg repo "$REPO" \
+          --arg sha "$SHA" \
           --argjson cli_command_results "$CLI_RESULTS" \
-          '{action: $action, email: $email, user_lesson_id: $user_lesson_id, cli_command_results: $cli_command_results}')
+          '{action: $action, github_username: $github_username, email: $email, user_lesson_id: $user_lesson_id, repo: $repo, sha: $sha, cli_command_results: $cli_command_results}')
+
+        # Auth: use API key header if provided, otherwise rely on repo+sha verification
+        AUTH_HEADER=""
+        if [ -n "${{ inputs.api-key }}" ]; then
+          AUTH_HEADER="X-API-Key: ${{ inputs.api-key }}"
+        fi
 
         RESPONSE=$(curl -s -w "\n%{http_code}" \
           -X POST \
-          -H "X-API-Key: ${{ inputs.api-key }}" \
+          ${AUTH_HEADER:+-H "$AUTH_HEADER"} \
           -H "Content-Type: application/json" \
           -d "$PAYLOAD" \
           "${API_URL}/api/github/grade" 2>&1) || true
@@ -230,9 +235,14 @@ runs:
             results: $results
           }')
 
+        AUTH_HEADER=""
+        if [ -n "${{ inputs.api-key }}" ]; then
+          AUTH_HEADER="X-API-Key: ${{ inputs.api-key }}"
+        fi
+
         curl -sf -X POST \
+          ${AUTH_HEADER:+-H "$AUTH_HEADER"} \
           -H "Content-Type: application/json" \
-          -H "X-API-Key: ${{ inputs.api-key }}" \
           -d "$PAYLOAD" \
           "${API_URL}/api/github/grading-result" || echo "::warning::Failed to report results to CloudSprints (non-fatal)"
         echo "::endgroup::"
