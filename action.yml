@@ -195,13 +195,13 @@ runs:
         echo "$BODY" | jq -r '.tasks[] | select(.status == "FAILED") | "  💡 " + .title + ": " + (.ai_explanation // "No explanation provided")'
         echo "::endgroup::"
 
-    # Step 6: Post results to GitHub App callback (if configured)
+    # Step 6: Post results to GitHub App (check runs + PR comments)
     - name: Report results to CloudSprints
-      if: inputs.callback-url != ''
+      if: github.event_name == 'pull_request'
       shell: bash
       run: |
         echo "::group::Reporting Results"
-        CALLBACK_URL="${{ inputs.callback-url }}"
+        API_URL="${{ inputs.api-url }}"
         REPO="${{ github.repository }}"
         PR_NUMBER="${{ github.event.pull_request.number }}"
         SHA="${{ github.event.pull_request.head.sha || github.sha }}"
@@ -232,7 +232,7 @@ runs:
           -H "Content-Type: application/json" \
           -H "X-API-Key: ${{ inputs.api-key }}" \
           -d "$PAYLOAD" \
-          "$CALLBACK_URL" || echo "::warning::Failed to report results to CloudSprints (non-fatal)"
+          "${API_URL}/api/github/grading-result" || echo "::warning::Failed to report results to CloudSprints (non-fatal)"
         echo "::endgroup::"
 
     # Step 7: Set job status
