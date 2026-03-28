@@ -170,6 +170,14 @@ runs:
         if [ "$HTTP_CODE" != "200" ]; then
           echo "::error::Grading submission failed (HTTP $HTTP_CODE)"
           echo "Response: $BODY"
+          # Save error info so the report step can close the check run
+          echo "status=error" >> $GITHUB_OUTPUT
+          echo "passed=0" >> $GITHUB_OUTPUT
+          echo "failed=0" >> $GITHUB_OUTPUT
+          echo "total=0" >> $GITHUB_OUTPUT
+          ERROR_MSG=$(echo "$BODY" | jq -r '.message // .error // "Grading submission failed"' 2>/dev/null || echo "Grading submission failed")
+          echo "error_message=$ERROR_MSG" >> $GITHUB_OUTPUT
+          echo '{"tasks":[]}' > /tmp/sprintctl_grading_results.json
           exit 1
         fi
 
@@ -203,7 +211,7 @@ runs:
 
     # Step 6: Post results to GitHub App (check runs + PR comments)
     - name: Report results to CloudSprints
-      if: github.event_name == 'pull_request'
+      if: always() && github.event_name == 'pull_request'
       shell: bash
       run: |
         echo "::group::Reporting Results"
@@ -212,15 +220,38 @@ runs:
         PR_NUMBER="${{ github.event.pull_request.number }}"
         SHA="${{ github.event.pull_request.head.sha || github.sha }}"
 
-        RESULTS_JSON=$(cat /tmp/sprintctl_grading_results.json)
+        STATUS="${{ steps.grade.outputs.status }}"
+        PASSED="${{ steps.grade.outputs.passed }}"
+        FAILED="${{ steps.grade.outputs.failed }}"
+        TOTAL="${{ steps.grade.outputs.total }}"
+        ERROR_MSG="${{ steps.grade.outputs.error_message }}"
+
+        # Default values if grading step didn't produce outputs
+        STATUS="${STATUS:-error}"
+        PASSED="${PASSED:-0}"
+        FAILED="${FAILED:-0}"
+        TOTAL="${TOTAL:-0}"
+
+        # Use results file if it exists, otherwise empty
+        if [ -f /tmp/sprintctl_grading_results.json ]; then
+          RESULTS_JSON=$(cat /tmp/sprintctl_grading_results.json)
+        else
+          RESULTS_JSON='{"tasks":[]}'
+        fi
+
+        # If there was an error, set status to error with message
+        if [ "$STATUS" = "error" ] && [ -n "$ERROR_MSG" ]; then
+          RESULTS_JSON=$(jq -nc --arg msg "$ERROR_MSG" '{tasks:[], error: $msg}')
+        fi
+
         PAYLOAD=$(jq -nc \
           --arg repo "$REPO" \
           --arg pr "$PR_NUMBER" \
           --arg sha "$SHA" \
-          --arg status "${{ steps.grade.outputs.status }}" \
-          --argjson passed "${{ steps.grade.outputs.passed }}" \
-          --argjson failed "${{ steps.grade.outputs.failed }}" \
-          --argjson total "${{ steps.grade.outputs.total }}" \
+          --arg status "$STATUS" \
+          --argjson passed "$PASSED" \
+          --argjson failed "$FAILED" \
+          --argjson total "$TOTAL" \
           --arg lesson_token "${{ steps.extract.outputs.lesson_token }}" \
           --argjson results "$RESULTS_JSON" \
           '{
